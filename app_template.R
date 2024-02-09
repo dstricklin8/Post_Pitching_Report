@@ -14,11 +14,15 @@ library(ggpubr)
 library(bslib)
 library(shinythemes)
 library(gridlayout)
+library(ggforce)
 library(gt)
 library(gtExtras)
 
+load("data/statcast_23.rda")
 load("data/info.rda")
 
+options(shiny.maxRequestSize = 10 * 1024^2)
+# App ----
 ui = grid_page(
   layout = c(
     "|     | 250px  |1fr        |1fr       |1fr        |1fr    |
@@ -30,11 +34,7 @@ ui = grid_page(
   grid_card(
     "sidebar",
     card_header("Pitching Report"),
-    fileInput("upload_1", "Upload .csv File", accept = c(".csv")),
-    selectizeInput("pitcher",
-                   label = "Select Pitcher",
-                   choices = mlb_arms,
-                   selected = NULL),
+    selectizeInput("pitcher", "Select Pitcher", choices = NULL),
     selectInput("batter_stands", 
                 label = "Batter Stands:",
                 choices = c("All", "Right", "Left")),
@@ -88,18 +88,10 @@ ui = grid_page(
       plotOutput("movement")
     )
   ),
-  # # velo_dist ----
-  # grid_card(
-  #   "velo_dist",
-  #   card_header("Velocity Distribution"),
-  #   card_body(
-  #     plotOutput("velo_dist")
-  #   )
-  # ),
   # rel_pt ----
   grid_card(
     "rel_pt",
-    card_header("Release Point"),
+    card_header("Release Point (Pitcher Perspective)"),
     card_body(
       plotOutput("rel_pt")
     )
@@ -116,21 +108,15 @@ ui = grid_page(
 
 #### Server ----
 server <- function(input, output, session) {
-  
   options(shiny.maxRequestSize = 10 * 1024^4)
   
-  # Hitters ----
-  df_1 <- eventReactive(input$upload_1, {
-    read.csv(input$upload_1$datapath)
-  })
-  
+  # observeEvent(input$session, {
+  #   updateSelectizeInput(session, "pitcher", choices = mlb_arms, server = TRUE)
+  # })
+
   data <- eventReactive(input$goButton_1, {
     
-    df <- df_1()
-    
-    sc_df <- mutate_sc(df)
-    
-    sc_df <- sc_df %>% 
+    sc_df <- sc_23 %>% 
       filter(player_name == input$pitcher)
     
     if (input$batter_stands == "Right") {sc_df <- sc_df %>% filter(stand == "R")}
@@ -139,6 +125,9 @@ server <- function(input, output, session) {
     return(sc_df)
     
   })
+  
+  ##### I am trying to reset the selectizeInput upon input from the Delete button
+  selectizeInput("pitcher", choices = unique(data()[["player_name"]]))
   
   output$legend <- renderPlot({
     p1 <- ggplot(data()) +
@@ -198,9 +187,6 @@ server <- function(input, output, session) {
       )
   })
   output$locations_2k <- renderPlot({
-    # df <- df_1()
-    # if (input$batter_stands == "Right") {df <- df %>% filter(stand == "R")}
-    # else if (input$batter_stands == "Left") {df <- df %>% filter(stand == "L")}
     
     ggplot() +
       geom_point(data() %>% filter(strikes == 2),
@@ -233,8 +219,8 @@ server <- function(input, output, session) {
   output$locations_whiffs <- renderPlot({
     ggplot() +
       geom_point(data() %>% filter(description %in% c("swinging_strike",
-                                                           "swinging_strike_blocked",
-                                                           "foul_tip")),
+                                                      "swinging_strike_blocked",
+                                                      "foul_tip")),
                  mapping = aes(x = plate_x*-12, y = plate_z*12, fill = pitch_name),
                  size = 4, shape = 21, show.legend = F) +
       geom_polygon(home_plate, mapping = aes(x, z), fill = "#ededed", color = "lightgrey") +
@@ -309,71 +295,46 @@ server <- function(input, output, session) {
   })
   output$rel_pt <- renderPlot({
     ggplot(data()) +
-      geom_point(aes(release_pos_x*-12, release_pos_z*12, fill = pitch_name),
+      geom_point(aes(release_pos_x*-1, release_pos_z, fill = pitch_name),
                  shape = 21, size = 2, show.legend = F) +
-      coord_equal(xlim = c(-42, 42), ylim = c(0, 84)) +
-      theme_linedraw() +
-      geom_vline(mapping = aes(xintercept = 0), linetype = 2, alpha = 0.5)+
-      geom_hline(mapping = aes(yintercept = 0), linetype = 2, alpha = 0.5)+
+      geom_circle(aes(x0=0, y0=-15.5, r=16), fill = "#ededed", color = "lightgrey") + 
+      coord_equal(xlim = c(-4, 4), ylim = c(0, 10), expand = c(0)) +
+      # geom_vline(mapping = aes(xintercept = 0), linetype = 2, alpha = 0.5)+
+      # geom_hline(mapping = aes(yintercept = 0), linetype = 2, alpha = 0.5)+
       scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
       scale_y_continuous(breaks = scales::pretty_breaks(n = 6)) +
-      scale_fill_manual(values = pitch_colors) +
       scale_fill_manual(values = pitch_colors) +
       theme_minimal() +
       labs(
         x = NULL,
         y = NULL
+      ) +
+      theme(
+        panel.grid.minor = element_blank(), 
+        axis.title = element_blank(),
+        axis.ticks = element_blank()
       )
   })
-  # output$velo_dist <- renderPlot({
-  #   ggplot(data()) +
-  #     # geom_density(aes(RelSpeed, fill = AutoPitchType), show.legend = F, alpha = 0.7) +
-  #     stat_density_ridges(aes(release_speed, pitch_name, fill = pitch_name), show.legend = F, alpha = 0.7,
-  #                         quantile_lines = TRUE, quantiles = 0.5) +
-  #     scale_fill_manual(values = pitch_colors) +
-  #     theme_minimal() +
-  #     labs(
-  #       x = NULL,
-  #       y = NULL
-  #     ) +
-  #     theme(
-  #       panel.grid.major = element_blank(), 
-  #       panel.grid.minor = element_blank()
-  #     )
-  # })
-  # output$spin_dist <- renderPlot({
-  #   ggplot(data()) +
-  #     # geom_density() +
-  #     stat_density_ridges(aes(release_spin_rate, pitch_name, fill = pitch_name), show.legend = F, alpha = 0.7,
-  #                         quantile_lines = TRUE, quantiles = 0.5) +
-  #     scale_fill_manual(values = pitch_colors) +
-  #     theme_minimal() +
-  #     labs(
-  #       x = NULL,
-  #       y = NULL
-  #     ) +
-  #     theme(
-  #       panel.grid.major = element_blank(), 
-  #       panel.grid.minor = element_blank()
-  #     )
-  # })
-  
   output$metrics <- render_gt({
     
     data () %>% 
-      group_by(pitch_name) %>% 
+      group_by(pitch_name, pitch_hex) %>% 
       summarise(
         num_pitches = n(),
-        release_speed = mean(release_speed, na.rm = T),
         max_rel_speed = max(release_speed, na.rm = T),
-        pfx_x = mean(pfx_x*12, na.rm = T),
-        pfx_z = mean(pfx_z*12, na.rm = T),
-        release_spin_rate = mean(release_spin_rate, na.rm = T)
-      ) %>% 
-      arrange(desc(num_pitches)) %>% 
+        release_speed = mean(release_speed, na.rm = T),
+        pfx_x = mean(pfx_x*-12),
+        pfx_z = mean(pfx_z*12),
+        release_spin_rate = mean(release_spin_rate, na.rm = T)) %>% 
+      arrange(pitch_name) %>% 
       ungroup() %>% 
+      mutate(
+        color = ""
+      ) %>% 
       gt()  %>% 
+      cols_hide(columns = c(pitch_hex)) %>% 
       cols_label(
+        color = "",
         pitch_name = md(""),
         release_speed = md("Avg. Velo"),
         max_rel_speed = md("Max. Velo"),
@@ -382,10 +343,35 @@ server <- function(input, output, session) {
         pfx_z = md("IVB"),
         num_pitches = md("Pitches")
       ) %>% 
+      cols_move(
+        columns = color,
+        after = pitch_name
+      )  %>% 
       fmt_number(columns = c("release_speed", "max_rel_speed", "pfx_x", "pfx_z"), decimals = 1) %>%  
       fmt_number(columns = c("release_spin_rate"), decimals = 0) %>%  
+      tab_style(
+        style = list(
+          cell_borders(
+            sides = c("top", "bottom"),
+            color = "grey90",
+            weight = px(1))),
+        locations = cells_body()) %>% 
+      cols_align(
+        align = c("center"),
+        columns = everything()
+      ) %>% 
+      tab_style(
+        style = list(
+          cell_fill(color = from_column(column = "pitch_hex")),
+          cell_text(color = "grey8", weight = "bold",
+                    font = system_fonts(name = "geometric-humanist"))),
+        locations = cells_body(columns = color)) %>%
       tab_options(table_body.hlines.style = "none")
   })
 }
 
 shinyApp(ui, server)
+
+
+
+

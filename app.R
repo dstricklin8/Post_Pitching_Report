@@ -1,3 +1,6 @@
+
+# TrackMan Reactive App ---------------------------------------------------
+
 #### Load Packages ----
 library(tidyverse)
 library(shiny)
@@ -18,35 +21,66 @@ library(ggforce)
 library(gt)
 library(gtExtras)
 
-# load("data/statcast_23.rda")
 load("data/info.rda")
 
-options(shiny.maxRequestSize = 10 * 1024^2)
-# App ----
+# Create Pitch Colors Palette for ggplot fill
+pitch_colors <- c(
+  "Sinker" = "#fe9d00",
+  "Slider" = "#efe717",
+  "ChangeUp" = "#1fbe3a",
+  "Changeup" = "#1fbe3a",
+  "Four-Seam" = "#d22d4a",
+  "Splitter" = "#3bacac",
+  "Curveball" = "#04d1ed",
+  "Cutter" = "#933f1f",
+  "Fastball" = "#d22d4a",
+  "TwoSeamFastBall" = "maroon3",
+  "Undefined" = "darkgrey",
+  "Other" = "darkgrey"
+)
+
+pitch_colors_tibble <- tibble(
+  pitch_tag = c("Sinker", "Slider", "Changeup", "ChangeUp",
+                "Four-Seam", "Splitter", "Curveball",
+                "Cutter", "Fastball", "TwoSeamFastBall", "Undefined", "Other"),
+  
+  pitch_hex = c("#fe9d00", "#efe717", "#1fbe3a", "#1fbe3a",
+                "#d22d4a", "#3bacac", "#04d1ed",
+                "#933f1f", "#d22d4a", "maroon3", "darkgrey", "darkgrey")
+)
+
 ui = grid_page(
+  theme = bs_theme(version = 5, bootswatch = "pulse"),
   layout = c(
-    "|     | 250px  |1fr        |1fr       |1fr        |1fr    |
-       |1fr  |sidebar |loc        |loc_2k    |ivb_hb     |rel_pt |
-       |1fr  |sidebar |loc        |loc_2k    |ivb_hb     |rel_pt |
-       |1fr  |legend  |loc_swings |loc_bip   |metrics    |metrics  |
-       |1fr  |legend  |loc_swings |loc_bip   |metrics    |metrics  |"
+    "|    |250px   |1fr        |1fr       |1fr         |1fr    |
+    |1fr  |sidebar |loc        |loc_2k    |loc_swings  |loc_bip |
+    |1fr  |sidebar |loc        |loc_2k    |loc_swings  |loc_bip |
+    |1fr  |sidebar |loc        |loc_2k    |loc_swings  |loc_bip |
+    |1fr  |sidebar |loc        |loc_2k    |loc_swings  |loc_bip |
+    |1fr  |sidebar |loc        |loc_2k    |loc_swings  |loc_bip |
+    |1fr  |sidebar |ivb_hb     |rel_pt    |metrics     |metrics  |
+    |1fr  |legend  |ivb_hb     |rel_pt    |metrics     |metrics  |
+    |1fr  |legend  |ivb_hb     |rel_pt    |metrics     |metrics  |
+    |1fr  |legend  |ivb_hb     |rel_pt    |metrics     |metrics  |
+    |1fr  |legend  |ivb_hb     |rel_pt    |metrics     |metrics  |"
   ),
   grid_card(
     "sidebar",
     card_header("Pitching Report"),
-    selectizeInput("pitcher",
-                   label = "Select Pitcher",
-                   choices = mlb_arms,
-                   selected = NULL),
+    fileInput("upload_1", "Upload TrackMan .csv File", accept = c(".csv"), placeholder = ""),
+    selectizeInput("pitcher", "Select Pitcher", choices = NULL),
     selectInput("batter_stands", 
                 label = "Batter Stands:",
                 choices = c("All", "Right", "Left")),
+    selectInput("pitch_tag", 
+                label = "Pitch Tag Type:",
+                choices = c("TaggedPitchType", "AutoPitchType")),
     actionButton("goButton_1", "Create Visual")
   ),
   # legend ----
   grid_card(
     "legend",
-    card_header("Pitch Types"),
+    card_header("Pitch Arsenal"),
     card_body(
       plotOutput("legend")
     )
@@ -94,7 +128,7 @@ ui = grid_page(
   # rel_pt ----
   grid_card(
     "rel_pt",
-    card_header("Release Point (Pitcher Perspective)"),
+    card_header("Release Point"),
     card_body(
       plotOutput("rel_pt")
     )
@@ -107,20 +141,103 @@ ui = grid_page(
       gt_output("metrics")
     )
   )
+  # # metrics ----
+  # grid_card(
+  #   "summary",
+  #   card_header("Plate Discipline"),
+  #   card_body(
+  #     gt_output("summary")
+  #   )
+  # )
 )
-
 #### Server ----
 server <- function(input, output, session) {
   
   options(shiny.maxRequestSize = 10 * 1024^4)
-
+  
+  df_1 <- eventReactive(input$upload_1, {
+    read.csv(input$upload_1$datapath)
+  })
+  
+  df_upload <- reactive({
+    filter(df_1(), !is.na(RelSpeed)) %>% 
+      arrange(Pitcher)
+  })
+  observeEvent(df_upload(), {
+    choices <- unique(df_upload()$Pitcher)
+    updateSelectizeInput(inputId = "pitcher", choices = choices) 
+  })
+  
   data <- eventReactive(input$goButton_1, {
     
-    sc_df <- sc_23 %>% 
-      filter(player_name == input$pitcher)
+    sc_df <- df_1() %>% 
+      filter(Pitcher == input$pitcher,
+             !is.na(AutoPitchType),
+             !is.na(TaggedPitchType),
+             !AutoPitchType %in% c("Undefined", "Other"),
+             !TaggedPitchType %in% c("Undefined", "Other")) %>% 
+      mutate(
+        TaggedPitchType = case_when(
+          TaggedPitchType == "FourSeamFastBall" ~ "Fastball",
+          T ~ TaggedPitchType),
+        PlateLocSide = 12*PlateLocSide,
+        PlateLocHeight = 12*PlateLocHeight,
+        
+        swing = ifelse(
+          PitchCall %in% c("StrikeSwinging", "FoulBall", "InPlay"), 1, 0),
+        
+        contact = ifelse(
+          PitchCall %in% c("FoulBall", "InPlay"), 1, 0),
+        
+        # fpK = case_when(
+        #   !PitchCall %in% c("BallCalled") & Count == "0-0" ~ 1,
+        #   PitchCall %in% c("BallCalled") & Count == "0-0" ~ 0,
+        #   !PitchCall %in% c("BallCalled") & Count != "0-0" ~ NA),
+        
+        strike = ifelse(
+          !PitchCall %in% c("BallCalled"), 1, 0),
+        
+        in_zone = if_else(
+          PlateLocSide >= -10 & PlateLocSide <= 10 &
+            PlateLocHeight >= 18 & PlateLocHeight <= 42, 1, 0),
+        
+        out_zone = 1 - in_zone,
+        
+        z_swing = case_when(
+          in_zone == "1" & swing == "1" ~ 1,
+          !in_zone == "1" & !swing == "1" ~ NA),
+        o_swing = case_when(
+          out_zone == "1" & swing == "1" ~ 1,
+          !out_zone == "1" & !swing == "1" ~ NA),
+        z_contact = case_when(
+          in_zone == "1" & contact == "1" ~ 1,
+          !in_zone == "1" & !contact == "1" ~ NA),
+        o_contact = case_when(
+          out_zone == "1" & contact == "1" ~ 1,
+          !out_zone == "1" & !contact == "1" ~ NA)
+      ) %>% 
+      mutate(date = ymd(Date)) %>% 
+      mutate_at(
+        vars(date),
+        funs(year, month, day)
+      )
     
-    if (input$batter_stands == "Right") {sc_df <- sc_df %>% filter(stand == "R")}
-    else if (input$batter_stands == "Left") {sc_df <- sc_df %>% filter(stand == "L")}
+    if (input$batter_stands == "Right") {sc_df <- sc_df %>% filter(BatterStands == "Right")}
+    else if (input$batter_stands == "Left") {sc_df <- sc_df %>% filter(BatterStands == "Left")}
+    
+    if (input$pitch_tag == "TaggedPitchType") {
+      sc_df$pitch_tag <- sc_df$TaggedPitchType
+    }
+    else if (input$pitch_tag == "AutoPitchType") {
+      sc_df$pitch_tag <- sc_df$AutoPitchType 
+    }
+    
+    sc_df <- left_join(sc_df, pitch_colors_tibble, by = c("pitch_tag"))
+    
+    sc_df <- sc_df %>% 
+      mutate(
+        pitch_tag = fct_infreq(pitch_tag)
+      )
     
     return(sc_df)
     
@@ -128,7 +245,7 @@ server <- function(input, output, session) {
   
   output$legend <- renderPlot({
     p1 <- ggplot(data()) +
-      geom_point(aes(plate_x*-12, plate_z*12, fill = pitch_name), shape = 21, size = 6) +
+      geom_point(aes(PlateLocSide, PlateLocHeight, fill = pitch_tag), shape = 21, size = 6) +
       scale_fill_manual(values = pitch_colors)
     
     library(cowplot)
@@ -151,13 +268,10 @@ server <- function(input, output, session) {
     plot_grid(legend_b, ncol = 1)
   })
   output$pitch_locations <- renderPlot({
-    # df <- df_1()
-    # if (input$batter_stands == "Right") {df <- df %>% filter(stand == "R")}
-    # else if (input$batter_stands == "Left") {df <- df %>% filter(stand == "L")}
     
     ggplot() +
       geom_point(data(),
-                 mapping = aes(x = plate_x*-12, y = plate_z*12, fill = pitch_name),
+                 mapping = aes(x = PlateLocSide, y = PlateLocHeight, fill = pitch_tag),
                  size = 4, shape = 21, show.legend = F) +
       geom_polygon(home_plate, mapping = aes(x, z), fill = "#ededed", color = "lightgrey") +
       geom_path(sz, mapping = aes(x, z), lty = 1, color = "darkgrey") +
@@ -167,7 +281,7 @@ server <- function(input, output, session) {
       geom_path(kzone_12, mapping = aes(x, z), lty = 1, color = "darkgrey") +
       geom_path(kzone_13, mapping = aes(x, z), lty = 1, color = "darkgrey") +
       geom_path(kzone_14, mapping = aes(x, z), lty = 1, color = "darkgrey") +
-      coord_equal(xlim = c(-24, 24), ylim = c(0, 54)) +
+      coord_equal(xlim = c(-24, 24), ylim = c(-6, 60)) +
       scale_fill_manual(values = pitch_colors) +
       theme_minimal() +
       labs(
@@ -186,8 +300,8 @@ server <- function(input, output, session) {
   output$locations_2k <- renderPlot({
     
     ggplot() +
-      geom_point(data() %>% filter(strikes == 2),
-                 mapping = aes(x = plate_x*-12, y = plate_z*12, fill = pitch_name),
+      geom_point(data() %>% filter(Strikes == 2),
+                 mapping = aes(x = PlateLocSide, y = PlateLocHeight, fill = pitch_tag),
                  size = 4, shape = 21, show.legend = F) +
       geom_polygon(home_plate, mapping = aes(x, z), fill = "#ededed", color = "lightgrey") +
       geom_path(sz, mapping = aes(x, z), lty = 1, color = "darkgrey") +
@@ -197,7 +311,7 @@ server <- function(input, output, session) {
       geom_path(kzone_12, mapping = aes(x, z), lty = 1, color = "darkgrey") +
       geom_path(kzone_13, mapping = aes(x, z), lty = 1, color = "darkgrey") +
       geom_path(kzone_14, mapping = aes(x, z), lty = 1, color = "darkgrey") +
-      coord_equal(xlim = c(-24, 24), ylim = c(0, 54)) +
+      coord_equal(xlim = c(-24, 24), ylim = c(-6, 60)) +
       scale_fill_manual(values = pitch_colors) +
       theme_minimal() +
       labs(
@@ -215,10 +329,8 @@ server <- function(input, output, session) {
   })
   output$locations_whiffs <- renderPlot({
     ggplot() +
-      geom_point(data() %>% filter(description %in% c("swinging_strike",
-                                                      "swinging_strike_blocked",
-                                                      "foul_tip")),
-                 mapping = aes(x = plate_x*-12, y = plate_z*12, fill = pitch_name),
+      geom_point(data() %>% filter(PitchCall %in% c("StrikeSwinging")),
+                 mapping = aes(x = PlateLocSide, y = PlateLocHeight, fill = pitch_tag),
                  size = 4, shape = 21, show.legend = F) +
       geom_polygon(home_plate, mapping = aes(x, z), fill = "#ededed", color = "lightgrey") +
       geom_path(sz, mapping = aes(x, z), lty = 1, color = "darkgrey", alpha = 0.5) +
@@ -228,7 +340,7 @@ server <- function(input, output, session) {
       geom_path(kzone_12, mapping = aes(x, z), lty = 1, color = "darkgrey", alpha = 0.5) +
       geom_path(kzone_13, mapping = aes(x, z), lty = 1, color = "darkgrey", alpha = 0.5) +
       geom_path(kzone_14, mapping = aes(x, z), lty = 1, color = "darkgrey", alpha = 0.5) +
-      coord_equal(xlim = c(-24, 24), ylim = c(0, 54)) +
+      coord_equal(xlim = c(-24, 24), ylim = c(-6, 60)) +
       scale_fill_manual(values = pitch_colors) +
       theme_minimal() +
       labs(
@@ -246,8 +358,8 @@ server <- function(input, output, session) {
   })
   output$locations_bip <- renderPlot({
     ggplot() +
-      geom_point(data() %>% filter(description %in% c("hit_into_play")),
-                 mapping = aes(x = plate_x*-12, y = plate_z*12, fill = pitch_name),
+      geom_point(data() %>% filter(PitchCall %in% c("InPlay")),
+                 mapping = aes(x = PlateLocSide, y = PlateLocHeight, fill = pitch_tag),
                  size = 4, shape = 21, show.legend = F) +
       geom_polygon(home_plate, mapping = aes(x, z), fill = "#ededed", color = "lightgrey") +
       geom_path(sz, mapping = aes(x, z), lty = 1, color = "darkgrey") +
@@ -257,7 +369,7 @@ server <- function(input, output, session) {
       geom_path(kzone_12, mapping = aes(x, z), lty = 1, color = "darkgrey") +
       geom_path(kzone_13, mapping = aes(x, z), lty = 1, color = "darkgrey") +
       geom_path(kzone_14, mapping = aes(x, z), lty = 1, color = "darkgrey") +
-      coord_equal(xlim = c(-24, 24), ylim = c(0, 54)) +
+      coord_equal(xlim = c(-24, 24), ylim = c(-6, 60)) +
       scale_fill_manual(values = pitch_colors) +
       theme_minimal() +
       labs(
@@ -275,13 +387,13 @@ server <- function(input, output, session) {
   })
   output$movement <- renderPlot({
     ggplot(data()) +
-      geom_point(mapping = aes(pfx_x*-12, pfx_z*12, fill = pitch_name),
+      geom_point(mapping = aes(HorzBreak, InducedVertBreak, fill = pitch_tag),
                  shape = 21, size = 3, show.legend = F) +
-      coord_equal(xlim = c(-24, 24), ylim = c(-30, 30)) +
+      coord_cartesian(xlim = c(-30, 30), ylim = c(-30, 30)) +
       theme_linedraw() +
       geom_vline(mapping = aes(xintercept = 0), linetype = 2, alpha = 0.5)+
       geom_hline(mapping = aes(yintercept = 0), linetype = 2, alpha = 0.5)+
-      scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+      scale_x_continuous(breaks = scales::pretty_breaks(n = 6), labels = abs) +
       scale_y_continuous(breaks = scales::pretty_breaks(n = 6)) +
       scale_fill_manual(values = pitch_colors) +
       theme_minimal() +
@@ -292,13 +404,11 @@ server <- function(input, output, session) {
   })
   output$rel_pt <- renderPlot({
     ggplot(data()) +
-      geom_point(aes(release_pos_x*-1, release_pos_z, fill = pitch_name),
-                 shape = 21, size = 2, show.legend = F) +
       geom_circle(aes(x0=0, y0=-15.5, r=16), fill = "#ededed", color = "lightgrey") + 
-      coord_equal(xlim = c(-4, 4), ylim = c(0, 10), expand = c(0)) +
-      # geom_vline(mapping = aes(xintercept = 0), linetype = 2, alpha = 0.5)+
-      # geom_hline(mapping = aes(yintercept = 0), linetype = 2, alpha = 0.5)+
-      scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+      geom_point(aes(RelSide*-1, RelHeight, fill = pitch_tag),
+                 shape = 21, size = 2, show.legend = F) +
+      coord_cartesian(xlim = c(-4, 4), ylim = c(0, 10), expand = c(0)) +
+      scale_x_continuous(breaks = scales::pretty_breaks(n = 6), labels = abs) +
       scale_y_continuous(breaks = scales::pretty_breaks(n = 6)) +
       scale_fill_manual(values = pitch_colors) +
       theme_minimal() +
@@ -313,39 +423,40 @@ server <- function(input, output, session) {
       )
   })
   output$metrics <- render_gt({
-    
-    data () %>% 
-      group_by(pitch_name, pitch_hex) %>% 
+   data() %>% 
+      group_by(pitch_tag, pitch_hex) %>% 
       summarise(
         num_pitches = n(),
-        max_rel_speed = max(release_speed, na.rm = T),
-        release_speed = mean(release_speed, na.rm = T),
-        pfx_x = mean(pfx_x*-12),
-        pfx_z = mean(pfx_z*12),
-        release_spin_rate = mean(release_spin_rate, na.rm = T)) %>% 
-      arrange(pitch_name) %>% 
+        max_rel_speed = max(RelSpeed, na.rm = T),
+        RelSpeed = mean(RelSpeed, na.rm = T),
+        HorzBreak = abs(mean(HorzBreak, na.rm = T)),
+        InducedVertBreak = mean(InducedVertBreak, na.rm = T),
+        SpinRate = mean(SpinRate, na.rm = T)
+      ) %>% 
+      arrange(pitch_tag) %>% 
       ungroup() %>% 
       mutate(
+        prop = num_pitches/sum(num_pitches),
         color = ""
       ) %>% 
       gt()  %>% 
       cols_hide(columns = c(pitch_hex)) %>% 
       cols_label(
         color = "",
-        pitch_name = md(""),
-        release_speed = md("Avg. Velo"),
+        pitch_tag = md(""),
+        prop = md("Usage"),
+        RelSpeed = md("Avg. Velo"),
         max_rel_speed = md("Max. Velo"),
-        release_spin_rate = md("Spin Rate"),
-        pfx_x = md("HB"),
-        pfx_z = md("IVB"),
+        SpinRate = md("Spin Rate"),
+        HorzBreak = md("HB"),
+        InducedVertBreak = md("IVB"),
         num_pitches = md("Pitches")
       ) %>% 
-      cols_move(
-        columns = color,
-        after = pitch_name
-      )  %>% 
-      fmt_number(columns = c("release_speed", "max_rel_speed", "pfx_x", "pfx_z"), decimals = 1) %>%  
-      fmt_number(columns = c("release_spin_rate"), decimals = 0) %>%  
+      cols_move(columns = c(color), after = pitch_tag)  %>% 
+      cols_move(columns = c(prop), after = num_pitches)  %>% 
+      fmt_number(columns = c("RelSpeed", "max_rel_speed", "HorzBreak", "InducedVertBreak"), decimals = 1) %>%  
+      fmt_number(columns = c("SpinRate"), decimals = 0) %>%  
+      fmt_percent(columns = c("prop"), decimals = 1) %>% 
       tab_style(
         style = list(
           cell_borders(
@@ -363,12 +474,42 @@ server <- function(input, output, session) {
           cell_text(color = "grey8", weight = "bold",
                     font = system_fonts(name = "geometric-humanist"))),
         locations = cells_body(columns = color)) %>%
-      tab_options(table_body.hlines.style = "none")
-  })
+      tab_options(table_body.hlines.style = "none") %>% 
+      gt_theme_538()
+    
+    })
+  # output$summary <- render_gt({
+  #   
+  #   data() %>% 
+  #     summarise(
+  #       num_pitches = n(),
+  #       zone_prop = mean(in_zone)*100,
+  #       Z_Swing = sum(z_swing, na.rm = TRUE)/sum(in_zone, na.rm = TRUE)*100,
+  #       Z_Contact = sum(z_contact, na.rm = TRUE)/sum(z_swing, na.rm = TRUE)*100,
+  #       chase = sum(o_swing, na.rm = TRUE)/sum(out_zone, na.rm = TRUE)*100,
+  #       chase_contact = sum(o_contact, na.rm = TRUE)/sum(o_swing, na.rm = TRUE)*100,
+  #       swing_prop = mean(swing)*100,
+  #       contact_prop = sum(contact)/sum(swing)*100,
+  #     ) %>% 
+  #     gt() %>% 
+  #     cols_label(
+  #       num_pitches = md("Pitches"),
+  #       zone_prop = md("Zone %"),
+  #       Z_Swing = md("Zone Swing %"),
+  #       Z_Contact = md("Zone Contact %"),
+  #       chase = md("Chase %"),
+  #       chase_contact = md("Chase Contact %"),
+  #       swing_prop = md("Swing%"),
+  #       contact_prop = md("Contact%"),
+  #     ) %>% 
+  #     fmt_number(
+  #       columns = c("zone_prop":"contact_prop"),
+  #       decimals = 1) %>% 
+  #     tab_options(table_body.hlines.style = "none") %>% 
+  #     gt_theme_538()
+  #   
+  # })
 }
 
 shinyApp(ui, server)
-
-
-
 

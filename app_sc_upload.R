@@ -16,22 +16,63 @@ library(shinythemes)
 library(gridlayout)
 library(gt)
 library(gtExtras)
+library(bslib)
 
 load("data/info.rda")
 
+# Create Pitch Colors Palette for ggplot fill
+pitch_colors <- c(
+  "Sinker" = "#fe9d00",
+  "Slider" = "#efe717",
+  "Changeup" = "#1fbe3a",
+  "4-Seam Fastball" = "#d22d4a",
+  "Split-Finger" = "#3bacac",
+  "Curveball" = "#04d1ed",
+  "Knuckle Curve" = "purple3",
+  "Cutter" = "#933f1f",
+  "Slurve" = "#b3b1fa",
+  "Sweeper" = "gold3",
+  "Screwball" = "limegreen",
+  "Forkball" = "#aaf0d1",
+  "Slow Curve" = "royalblue",
+  "Knuckleball" = "darkgrey"
+)
+
+# Create Pitch Colors Palette for gt table fill
+pitch_colors_tibble <- tibble(
+  pitch_name = c("Sinker", "Slider", "Changeup", "4-Seam Fastball", "Split-Finger",
+                 "Curveball", "Knuckle Curve", "Cutter", "Slurve", "Sweeper", "Screwball",
+                 "Forkball", "Slow Curve", "Knuckleball"),
+  
+  pitch_hex = c("#fe9d00", "#efe717", "#1fbe3a", "#d22d4a", "#3bacac", "#04d1ed", "purple3",
+                "#933f1f", "#b3b1fa", "gold3", "limegreen", "#aaf0d1", "royalblue", "darkgrey")
+)
+
 ui = grid_page(
+  theme = bs_theme(version = 5, bootswatch = "pulse"),
   layout = c(
-    "|     | 250px  |1fr        |1fr       |1fr        |1fr    |
-       |1fr  |sidebar |loc        |loc_2k    |ivb_hb     |rel_pt |
-       |1fr  |sidebar |loc        |loc_2k    |ivb_hb     |rel_pt |
-       |1fr  |legend  |loc_swings |loc_bip   |metrics    |metrics  |
-       |1fr  |legend  |loc_swings |loc_bip   |metrics    |metrics  |"
+    "|    |250px   |1fr        |1fr       |1fr         |1fr    |
+    |1fr  |sidebar |loc        |loc_2k    |loc_swings  |loc_bip |
+    |1fr  |sidebar |loc        |loc_2k    |loc_swings  |loc_bip |
+    |1fr  |sidebar |loc        |loc_2k    |loc_swings  |loc_bip |
+    |1fr  |sidebar |loc        |loc_2k    |loc_swings  |loc_bip |
+    |1fr  |sidebar |loc        |loc_2k    |loc_swings  |loc_bip |
+    |1fr  |sidebar |ivb_hb     |rel_pt    |metrics     |metrics  |
+    |1fr  |legend  |ivb_hb     |rel_pt    |metrics     |metrics  |
+    |1fr  |legend  |ivb_hb     |rel_pt    |metrics     |metrics  |
+    |1fr  |legend  |ivb_hb     |rel_pt    |metrics     |metrics  |
+    |1fr  |legend  |ivb_hb     |rel_pt    |metrics     |metrics  |"
   ),
   grid_card(
     "sidebar",
     card_header("Pitching Report"),
     fileInput("upload_1", "Upload Statcast .csv File", accept = c(".csv"), placeholder = ""),
-    selectizeInput("pitcher", "Select Pitcher", choices = NULL),
+    textInput("player_first",
+              "Enter Pitchers's First Name",
+              value = ""),
+    textInput("player_last",
+              "Enter Pitchers's Last Name",
+              value = ""),
     selectInput("batter_stands", 
                 label = "Batter Stands:",
                 choices = c("All", "Right", "Left")),
@@ -113,21 +154,19 @@ server <- function(input, output, session) {
     read.csv(input$upload_1$datapath)
   })
   
-  df_upload <- reactive({
-    filter(df_1(), !is.na(release_speed)) %>% 
-      arrange(player_name)
-  })
-  observeEvent(df_upload(), {
-    choices <- unique(df_upload()$player_name)
-    updateSelectizeInput(inputId = "pitcher", choices = choices) 
-  })
-  
   data <- eventReactive(input$goButton_1, {
     
     sc_df <- mutate_sc(df_1())
     
+    playername <- paste(input$player_last, input$player_first, sep = ", ")
+    
     sc_df <- sc_df %>% 
-      filter(player_name == input$pitcher)
+      filter(player_name == playername)
+    
+    sc_df <- left_join(sc_df, pitch_colors_tibble, by = c("pitch_name"))
+    
+    sc_df <- sc_df %>% 
+      mutate(pitch_name = fct_infreq(pitch_name))
     
     if (input$batter_stands == "Right") {sc_df <- sc_df %>% filter(stand == "R")}
     else if (input$batter_stands == "Left") {sc_df <- sc_df %>% filter(stand == "L")}
@@ -288,7 +327,7 @@ server <- function(input, output, session) {
   })
   output$movement <- renderPlot({
     ggplot(data()) +
-      geom_point(mapping = aes(pfx_x*-12, pfx_z*12, fill = pitch_name),
+      geom_point(mapping = aes(pfx_x*12, pfx_z*12, fill = pitch_name),
                  shape = 21, size = 3, show.legend = F) +
       coord_equal(xlim = c(-24, 24), ylim = c(-30, 30)) +
       theme_linedraw() +
@@ -324,7 +363,7 @@ server <- function(input, output, session) {
   output$metrics <- render_gt({
     
     data () %>% 
-      group_by(pitch_name) %>% 
+      group_by(pitch_name, pitch_hex) %>% 
       summarise(
         num_pitches = n(),
         max_rel_speed = max(release_speed, na.rm = T),
@@ -333,11 +372,18 @@ server <- function(input, output, session) {
         pfx_z = mean(pfx_z*12, na.rm = T),
         release_spin_rate = mean(release_spin_rate, na.rm = T)
       ) %>% 
-      arrange(desc(num_pitches)) %>% 
+      arrange(pitch_name) %>% 
       ungroup() %>% 
+      mutate(
+        prop = num_pitches/sum(num_pitches),
+        color = ""
+      ) %>% 
       gt()  %>% 
+      cols_hide(columns = c(pitch_hex)) %>% 
       cols_label(
+        color = "",
         pitch_name = md(""),
+        prop = md("Usage"),
         release_speed = md("Avg. Velo"),
         max_rel_speed = md("Max. Velo"),
         release_spin_rate = md("Spin Rate"),
@@ -345,9 +391,30 @@ server <- function(input, output, session) {
         pfx_z = md("IVB"),
         num_pitches = md("Pitches")
       ) %>% 
+      cols_move(columns = c(color), after = pitch_name)  %>% 
+      cols_move(columns = c(prop), after = num_pitches)  %>% 
       fmt_number(columns = c("release_speed", "max_rel_speed", "pfx_x", "pfx_z"), decimals = 1) %>%  
       fmt_number(columns = c("release_spin_rate"), decimals = 0) %>%  
-      tab_options(table_body.hlines.style = "none")
+      fmt_percent(columns = c("prop"), decimals = 1) %>% 
+      tab_style(
+        style = list(
+          cell_borders(
+            sides = c("top", "bottom"),
+            color = "grey90",
+            weight = px(1))),
+        locations = cells_body()) %>% 
+      cols_align(
+        align = c("center"),
+        columns = everything()
+      ) %>% 
+      tab_style(
+        style = list(
+          cell_fill(color = from_column(column = "pitch_hex")),
+          cell_text(color = "grey8", weight = "bold",
+                    font = system_fonts(name = "geometric-humanist"))),
+        locations = cells_body(columns = color)) %>%
+      tab_options(table_body.hlines.style = "none") %>% 
+      gt_theme_538()
   })
 }
 

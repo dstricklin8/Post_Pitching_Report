@@ -1,8 +1,9 @@
 #### Load Packages ----
 library(tidyverse)
 
+# STATCAST APP ----
 # Load Statcast Data
-load("data/statcast_23.rda")
+# load("data/statcast_23.rda")
 
 # Create Pitch Colors Palette for ggplot fill
 pitch_colors <- c(
@@ -111,7 +112,152 @@ z <- c(18, 30, 30, 14, 14, 18, 18)
 kzone_14 <- data.frame(x, z)
 
 # Save Data
-save(sc_23, mlb_arms, pitch_colors, home_plate, sz, sz_2, sz_3,
+save(sc_23, mlb_arms, mutate_sc, pitch_colors, home_plate, sz, sz_2, sz_3,
      kzone_11, kzone_12, kzone_13, kzone_14, file = "data/info.rda")
+
+# TRACKMAN APP ----
+
+season <- read_csv("data/23_season.csv")
+
+test <- season
+
+test$pitch_tag <- test$TaggedPitchType
+
+unique(season$TaggedPitchType)
+
+# Create Pitch Colors Palette for ggplot fill
+pitch_colors <- c(
+  "Sinker" = "#fe9d00",
+  "Slider" = "#efe717",
+  "ChangeUp" = "#1fbe3a",
+  "Changeup" = "#1fbe3a",
+  "Four-Seam" = "#d22d4a",
+  "Splitter" = "#3bacac",
+  "Curveball" = "#04d1ed",
+  "Cutter" = "#933f1f",
+  "Fastball" = "#d22d4a",
+  "TwoSeamFastBall" = "maroon3",
+  "Undefined" = "darkgrey",
+  "Other" = "darkgrey"
+)
+
+pitch_colors_tibble <- tibble(
+  pitch_tag = c("Sinker", "Slider", "Changeup", "ChangeUp",
+                "Four-Seam", "Splitter", "Curveball",
+                 "Cutter", "Fastball", "TwoSeamFastBall", "Undefined", "Other"),
+  
+  pitch_hex = c("#fe9d00", "#efe717", "#1fbe3a", "#1fbe3a",
+                "#d22d4a", "#3bacac", "#04d1ed",
+                "#933f1f", "#d22d4a", "maroon3", "darkgrey", "darkgrey")
+)
+
+tm_colors <- left_join(test, pitch_colors_tibble, by = c("pitch_tag"))
+
+season %>% 
+  filter(
+    Pitcher == "Utagawa, David"
+  ) %>% 
+  select(
+    TaggedPitchType, AutoPitchType
+  ) %>% 
+  view()
+
+
+test <- season %>% 
+  filter(Pitcher == "Utagawa, David",
+         !is.na(AutoPitchType),
+         !is.na(TaggedPitchType),
+         !AutoPitchType %in% c("Undefined", "Other"),
+         !TaggedPitchType %in% c("Undefined", "Other")) %>% 
+  mutate(
+    TaggedPitchType = case_when(
+      TaggedPitchType == "FourSeamFastBall" ~ "Fastball",
+      T ~ TaggedPitchType),
+    PlateLocSide = 12*PlateLocSide,
+    PlateLocHeight = 12*PlateLocHeight,
+    
+    swing = ifelse(
+      PitchCall %in% c("StrikeSwinging", "FoulBall", "InPlay"), 1, 0),
+    
+    contact = ifelse(
+      PitchCall %in% c("FoulBall", "InPlay"), 1, 0),
+    
+    # fpK = case_when(
+    #   !PitchCall %in% c("BallCalled") & Count == "0-0" ~ 1,
+    #   PitchCall %in% c("BallCalled") & Count == "0-0" ~ 0,
+    #   !PitchCall %in% c("BallCalled") & Count != "0-0" ~ NA),
+    
+    strike = ifelse(
+      !PitchCall %in% c("BallCalled"), 1, 0),
+    
+    in_zone = if_else(
+      PlateLocSide >= -10 & PlateLocSide <= 10 &
+        PlateLocHeight >= 18 & PlateLocHeight <= 42, 1, 0),
+    
+    out_zone = 1 - in_zone,
+    
+    z_swing = case_when(
+      in_zone == "1" & swing == "1" ~ 1,
+      !in_zone == "1" & !swing == "1" ~ NA),
+    o_swing = case_when(
+      out_zone == "1" & swing == "1" ~ 1,
+      !out_zone == "1" & !swing == "1" ~ NA),
+    z_contact = case_when(
+      in_zone == "1" & contact == "1" ~ 1,
+      !in_zone == "1" & !contact == "1" ~ NA),
+    o_contact = case_when(
+      out_zone == "1" & contact == "1" ~ 1,
+      !out_zone == "1" & !contact == "1" ~ NA)
+  ) %>% 
+  mutate(date = ymd(Date)) %>% 
+  mutate_at(
+    vars(date),
+    funs(year, month, day)
+    )
+
+ggplot(test %>% filter(Pitcher == "Utagawa, David")) +
+  geom_bar(aes(AutoPitchType, fill = AutoPitchType)) +
+  scale_fill_manual(values = pitch_colors) +
+  theme_minimal() +
+  guides(colour = guide_legend(ncol = 1)) +
+  theme(
+    legend.key.size = unit(rel(1.2), 'cm'),
+    legend.text = element_text(size = rel(1.2)),
+    legend.title = element_blank(),
+    legend.box.background = element_blank(),
+    legend.background = element_blank(),
+    legend.box = element_blank(),
+    legend.box.margin = margin(0, -1, 0, -1),
+    legend.position = "left"
+  )
+
+test %>% 
+  group_by(year) %>% 
+  summarise(
+    num_pitches = n(),
+    zone_prop = mean(in_zone)*100,
+    Z_Swing = sum(z_swing, na.rm = TRUE)/sum(in_zone, na.rm = TRUE)*100,
+    Z_Contact = sum(z_contact, na.rm = TRUE)/sum(z_swing, na.rm = TRUE)*100,
+    chase = sum(o_swing, na.rm = TRUE)/sum(out_zone, na.rm = TRUE)*100,
+    chase_contact = sum(o_contact, na.rm = TRUE)/sum(o_swing, na.rm = TRUE)*100,
+    swing_prop = mean(swing)*100,
+    contact_prop = sum(contact)/sum(swing)*100,
+  ) %>% 
+  gt(rowname_col = "year") %>% 
+  cols_label(
+    num_pitches = md("Pitches"),
+    zone_prop = md("Zone %"),
+    Z_Swing = md("Zone Swing %"),
+    Z_Contact = md("Zone Contact %"),
+    chase = md("Chase %"),
+    chase_contact = md("Chase Contact %"),
+    swing_prop = md("Swing%"),
+    contact_prop = md("Contact%"),
+  ) %>% 
+  fmt_number(
+    columns = c("zone_prop":"contact_prop"),
+    decimals = 1) %>% 
+  tab_options(table_body.hlines.style = "none") %>% 
+  gt_theme_nytimes()
 
 
